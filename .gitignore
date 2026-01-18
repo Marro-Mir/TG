@@ -1,0 +1,15 @@
+# Секретные ключи Google
+creds.json
+
+# Виртуальное окружение (если есть)
+venv/
+.env
+
+# Файлы настроек Cursor/VSCode
+.vscode/
+
+# Кэш Python
+__pycache__/
+*.py[cod]
+
+config.py
