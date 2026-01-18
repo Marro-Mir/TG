@@ -1,6 +1,6 @@
 import telebot
+import config
 from telebot import types # Импортируем типы для создания кнопок
-
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
@@ -12,23 +12,37 @@ client = gspread.authorize(creds)
 # Открываем таблицу и конкретный лист
 sheet = client.open("Smiylia_bot").worksheet("photo_catalog") 
 
+# ОБЯЗАТЕЛЬНО: Создаем переменную ДО того, как она понадобится функциям
+data_cache = sheet.get_all_records()
+
+# При запуске бота скачать всё
+all_items = sheet.get_all_records() # Скачивает всю таблицу в список словарей
+
  # --- 1. Твой вспомогательный инструмент (ставим ПЕРЕД обработчиком кнопок. Перед тем где они открываются) ---
 def get_item_by_id(item_id):
-    try:
-        cell = sheet.find(item_id) 
-        row = sheet.row_values(cell.row) 
+    # Ищем товар в сохраненном списке
+    for row in data_cache:
 
-# Разрезаем строку со ссылками по запятой и убираем лишние пробелы
-        photo_links = [link.strip() for link in row[3].split(',')]
+# ПРИНТ 1: Посмотрим, какие ключи видит бот в таблице
+        # (выполнится один раз для первой строки)
+        if row == data_cache[0]:
+            print(f"Ключи в таблице: {list(row.keys())}")
+            
+        # ПРИНТ 2: С чем бот сравнивает нажатую кнопку
+        print(f"Сравниваю: таблицу '{row.get('ID товара')}' и кнопку '{item_id}'")
 
-        return {
-            "name": row[2],   # Столбец C
-            "photo": photo_links, # Теперь тут список ссылок Столбец D
-            "desc": row[4],   # Столбец E
-            "price": row[5]   # Столбец F
-        }
-    except:
-        return None
+        # Проверяем столбец 'ID' (название должно совпадать с заголовком в таблице!)
+        if str(row.get('ID товара')) == item_id.strip():
+            # Превращаем ссылки в список (для альбомов)
+            photos = [p.strip() for p in str(row.get('Ссылка на фото', '')).split(',')]
+            
+            return {
+                "name": row.get('Название'),
+                "photos": photos,
+                "desc": row.get('Описание'),
+                "price": row.get('Цена')
+            }
+    return None
 
 user_carts = {} # Здесь будем хранить товары: {user_id: [список товаров]}   # хранение корзины пользователя
 bot = telebot.TeleBot(config.TOKEN)
@@ -67,6 +81,26 @@ def help_command(message):
         "💬 Личка мастера: @твой_ник"
     )
     bot.send_message(message.chat.id, help_text, parse_mode='HTML')
+
+@bot.message_handler(commands=['refresh'])
+def refresh_data(message):
+    # Проверяем, что пишет именно админ
+    if message.from_user.id == config.ADMIN_ID:
+        try:
+            global data_cache
+            # Отправляем сообщение, чтобы ты видела — процесс пошел
+            msg = bot.send_message(message.chat.id, "🔄 Обновляю данные из таблицы...")
+            
+            # Заново скачиваем всё из Google Sheets
+            data_cache = sheet.get_all_records()
+            
+            # Редактируем старое сообщение, когда всё готово
+            bot.edit_message_text("✅ Данные успешно обновлены! Теперь бот использует актуальную информацию из таблицы.", 
+                                  message.chat.id, msg.message_id)
+        except Exception as e:
+            bot.send_message(message.chat.id, f"❌ Ошибка при обновлении: {e}")
+    else:
+        bot.send_message(message.chat.id, "У вас нет прав для выполнения этой команды.")
 
 @bot.message_handler(content_types=['contact'])
 def contact(message):
@@ -186,6 +220,9 @@ def get_text_messages(message):
         # Обработка нажатий на инлайн-кнопки (callback)
 @bot.callback_query_handler(func=lambda call: True)
 def callback_worker(call):
+    print(f"--- Нажата кнопка: {call.data} ---")
+
+    item = None
     # --- УРОВЕНЬ 1: ШАРЫ ИЛИ ИГРУШКИ ---
     if call.data == "balloons":
         markup = types.InlineKeyboardMarkup()
@@ -269,18 +306,20 @@ def callback_worker(call):
     # --- ЛОГИКА ДЛЯ МИШЕК ---
     # Карточка №1 для Мишек
     elif call.data == "bears_teddy":
-        # Зовем функцию, передаем ей ID из таблицы
         item = get_item_by_id("bears_teddy")
+
+        print(f"Результат поиска item: {item}") # Посмотрим, что вернулось сюда
 
 # ПРОВЕРКА: если item равен None (ничего не нашли)
         if item is None:
+            print("⚠ Бот остановился: item пустой")
             bot.answer_callback_query(call.id, "❌ Ошибка: ID 'bears_teddy' не найден в таблице! Пожалуйста, напишите мастеру 'Привет!' в этом чате или в Telegram @smiylia_studio", show_alert=True)
             return  # Останавливаем функцию здесь, чтобы не было ошибок дальше
 
         if item:
             # Кнопки для карточки №1 для Мишек
             markup = types.InlineKeyboardMarkup()
-            btn_next = types.InlineKeyboardButton(text="Следующий ➡️", callback_data="bear_2")
+            btn_next = types.InlineKeyboardButton(text="Следующий ➡️", callback_data="bears_brown_white")
             btn_add = types.InlineKeyboardButton(text="🛒 Добавить в корзину", callback_data="add_bears_teddy")
             btn_back = types.InlineKeyboardButton(text="⬅️ В главное меню", callback_data="back_to_main")
             markup.add(btn_add)
@@ -290,8 +329,48 @@ def callback_worker(call):
             caption = f"<b>{item['name']}</b>\n\n{item['desc']}\n\n💰 <b>Цена: от {item['price']} ₽</b>"
 
          # ПРОВЕРКА ДЛЯ ПЛАВНОСТИ:
+        try:
+            if len(item['photos']) == 1:
+                print("🚀 Режим: Одно фото")
+                # Пытаемся заменить старое сообщение на фото
+                if call.message.content_type == 'photo':
+                    media = types.InputMediaPhoto(item['photos'][0], caption=caption, parse_mode='HTML')
+                    bot.edit_message_media(media, call.message.chat.id, call.message.message_id, reply_markup=markup)
+                else:
+                     # Если старое было текстом - удаляем и шлем новое
+                    bot.delete_message(call.message.chat.id, call.message.message_id)
+                    bot.send_photo(call.message.chat.id, item['photos'][0], caption=caption, parse_mode='HTML', reply_markup=markup)
+        
+            elif len(item['photos']) > 1:
+                print("🚀 Режим: Альбом")
+                bot.delete_message(call.message.chat.id, call.message.message_id)
+                media_group = []
+                for i, url in enumerate(item['photos']):
+                    media_group.append(types.InputMediaPhoto(url, caption=caption if i == 0 else '', parse_mode='HTML'))
+            
+                bot.send_media_group(call.message.chat.id, media_group)
+                bot.send_message(call.message.chat.id, "Выберите действие:", reply_markup=markup)
+
+        except Exception as e:
+            print(f"❌ Ошибка при отправке: {e}")
+           # Если всё сломалось, пробуем просто отправить текст, чтобы юзер не висел
+            bot.send_message(call.message.chat.id, f"Ошибка загрузки фото, но вот описание:\n\n{caption}", reply_markup=markup)
+
+    elif call.data == "bears_brown_white": 
+        item = get_item_by_id("bears_brown_white") 
+        # Карточка №2 для Мишек
+        markup = types.InlineKeyboardMarkup()
+        btn_prev = types.InlineKeyboardButton(text="⬅️ Предыдущий", callback_data="bears_teddy")
+        btn_add = types.InlineKeyboardButton(text="🛒 Добавить в корзину", callback_data="add_bears_brown_white")
+        btn_back = types.InlineKeyboardButton(text="⬅️ В главное меню", callback_data="back_to_main")
+        markup.add(btn_add)
+        markup.add(btn_prev)
+        markup.add(btn_back)
+
+        caption = f"<b>{item['name']}</b>\n\n{item['desc']}\n\n💰 <b>Цена: от {item['price']} ₽</b>"
+
+         # ПРОВЕРКА ДЛЯ ПЛАВНОСТИ:
         if call.message.content_type == 'photo':
-            # Если мы УЖЕ смотрим фото (нажали "Назад" со второй фотозоны)
             # ПРОВЕРКА: Одно фото или несколько?
             if len(item['photos']) == 1:
                 # --- РЕЖИМ ОДНОГО ФОТО (Плавный) ---
@@ -313,32 +392,6 @@ def callback_worker(call):
                 bot.send_media_group(call.message.chat.id, media_group)
                 # Кнопки шлем отдельным сообщением под альбом
                 bot.send_message(call.message.chat.id, "Выберите действие:", reply_markup=markup)
-        
-        # Этот кусок для проверки откуда пришли. Сейчас не нужен так как есть проверка выше в коде (режим альбома) 
-        else:
-            # Если мы зашли сюда из ТЕКСТОВОГО меню 
-            bot.delete_message(call.message.chat.id, call.message.message_id)
-            bot.send_photo(call.message.chat.id, item['photo'], caption=caption, parse_mode='HTML', reply_markup=markup)
-
-        # Если в таблице пусто или ID "bears_teddy" не найден
-    elif call.data == "bears_teddy":
-        bot.answer_callback_query(call.id, "Ошибка: Товар не найден в таблице!", show_alert=True)
-        return
-
-    elif call.data == "bear_2":
-        # Карточка №2 для Мишек
-        markup = types.InlineKeyboardMarkup()
-        btn_prev = types.InlineKeyboardButton(text="⬅️ Предыдущий", callback_data="bears_teddy")
-        btn_add = types.InlineKeyboardButton(text="🛒 Добавить в корзину", callback_data="add_bear_2")
-        btn_back = types.InlineKeyboardButton(text="⬅️ В главное меню", callback_data="back_to_main")
-        markup.add(btn_add)
-        markup.add(btn_prev)
-        markup.add(btn_back)
-
-        media = types.InputMediaPhoto("https://drive.google.com/uc?export=download&id=1ZIIh5y1Vh9Tr-6jLrOAFSI1c5wvazqua", 
-                                    caption="<b>🧸 Большой Мишка (Гигант)</b>\n\nВысота: 120 см\nШикарный подарок на праздник!\n\n💰 <b>Цена: 7 500 ₽</b>", 
-                                    parse_mode='HTML')
-        bot.edit_message_media(media, call.message.chat.id, call.message.message_id, reply_markup=markup)
 
         # --- Обработка добавления в корзину ---
     elif "add_" in call.data:
