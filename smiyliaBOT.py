@@ -4,7 +4,9 @@ from telebot import types # Импортируем типы для создан�
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-# Настройка доступа
+user_carts = {} # Здесь будем хранить товары: {user_id: [список товаров]}   # хранение корзины пользователя
+
+# Настройка доступа гугла
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 creds = ServiceAccountCredentials.from_json_keyfile_name("creds.json", scope)
 client = gspread.authorize(creds)
@@ -12,23 +14,23 @@ client = gspread.authorize(creds)
 # Открываем таблицу и конкретный лист
 sheet = client.open("Smiylia_bot").worksheet("photo_catalog") 
 
-# ОБЯЗАТЕЛЬНО: Создаем переменную ДО того, как она понадобится функциям
+# ОБЯЗАТЕЛЬНО: Создаем переменную списка кэша ДО того, как она понадобится функциям. Для заиси данных из гугла в телегу, чтобы не тупило.
 data_cache = sheet.get_all_records()
 
 # При запуске бота скачать всё
-all_items = sheet.get_all_records() # Скачивает всю таблицу в список словарей
+all_items = sheet.get_all_records() # Скачивает всю таблицу в список словарей, чтобы не тупило
 
- # --- 1. Твой вспомогательный инструмент (ставим ПЕРЕД обработчиком кнопок. Перед тем где они открываются) ---
+ # --- 1. Твой вспомогательный инструмент (ставим ПЕРЕД обработчиком кнопок. Перед тем где открываются карточки) ---
 def get_item_by_id(item_id):
     # Ищем товар в сохраненном списке
     for row in data_cache:
 
-# ПРИНТ 1: Посмотрим, какие ключи видит бот в таблице
+        # ПРИНТ 1(проверка): Посмотрим, какие ключи видит бот в таблице
         # (выполнится один раз для первой строки)
         if row == data_cache[0]:
             print(f"Ключи в таблице: {list(row.keys())}")
             
-        # ПРИНТ 2: С чем бот сравнивает нажатую кнопку
+        # ПРИНТ 2(проверка): С чем бот сравнивает нажатую кнопку
         print(f"Сравниваю: таблицу '{row.get('ID товара')}' и кнопку '{item_id}'")
 
         # Проверяем столбец 'ID' (название должно совпадать с заголовком в таблице!)
@@ -44,18 +46,19 @@ def get_item_by_id(item_id):
             }
     return None
 
-user_carts = {} # Здесь будем хранить товары: {user_id: [список товаров]}   # хранение корзины пользователя
+# --- 2. Основной связывающий блок. Через ТГ айдишники и токены ---
 bot = telebot.TeleBot(config.TOKEN)
 # Присваиваем значение из конфига локальной переменной
 ADMIN_ID = config.ADMIN_ID # Мой ID
 
+# --- 3. Блок объявления начальных кнопок и при использовании /start ---
 @bot.message_handler(commands=['start'])
 def start(message):
     # Создаем каркас для кнопок
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     
     # Создаем сами кнопки
-    btn1 = types.KeyboardButton("🎈 Посмотреть каталог")
+    btn1 = types.KeyboardButton("🎈 Каталог")
     btn2 = types.KeyboardButton("💰 Прайс-лист")
     btn3 = types.KeyboardButton("📞 Связаться с мастером")
     btn4 = types.KeyboardButton("📸 Наши соц сети")
@@ -66,10 +69,10 @@ def start(message):
     
     # Отправляем сообщение с кнопками
     bot.send_message(message.chat.id, 
-                     f"Привет, {message.from_user.first_name}! \nЯ SmileTime - помощник студии аэродизайна. Чем могу помочь? \n\nДля навигации в боте нажмите: 4 квадратика справа в строке сообщений 㗊 для выбора товаров и услуг, нажмите на 3 полосочки ☰ для помощи. Или просто напишите сообщение в этот чат и мастер ответит вам =) \n\n Ждём ваших заказов 🤗" , 
+                     f"Привет, {message.from_user.first_name}! \nЯ SmileTime - помощник студии аэродизайна. Чем могу помочь? \n\nНавигация в боте: \n* нажмите 4 квадратика справа в строке сообщений 㗊 для выбора товаров и услуг \n* нажмите на 3 полосочки ☰ для помощи \n* или просто напишите сообщение в этот чат и мастер ответит вам =) \n\n Ждём ваших заказов 🤗" , 
                      reply_markup=markup)
 
-# Обработчик команды /help
+# --- 4. Обработчик команды /help ---
 @bot.message_handler(commands=['help'])
 def help_command(message):
     help_text = (
@@ -82,6 +85,7 @@ def help_command(message):
     )
     bot.send_message(message.chat.id, help_text, parse_mode='HTML')
 
+# --- 5. Обработчик команды /refresh только для админа. Обновление данных из таблицы ---
 @bot.message_handler(commands=['refresh'])
 def refresh_data(message):
     # Проверяем, что пишет именно админ
@@ -102,6 +106,7 @@ def refresh_data(message):
     else:
         bot.send_message(message.chat.id, "У вас нет прав для выполнения этой команды.")
 
+# --- 6. Обработчик команды "contact - Оформить заказ". Отправка Админу ---
 @bot.message_handler(content_types=['contact'])
 def contact(message):
     user_id = message.from_user.id
@@ -109,18 +114,18 @@ def contact(message):
     items = "\n— ".join(user_carts.get(user_id, ["Товары не определены"]))
     phone = message.contact.phone_number
 
-    # Сообщение админу
+    # 1. Сообщение админу при отправке С НОМЕРОМ
     admin_text = (
         f"🔔 <b>НОВЫЙ ЗАКАЗ С НОМЕРОМ!</b>\n\n"
-        f"👤 Клиент: {message.from_user.first_name}\n"
+        f"👤 Клиент: <a href='tg://user?id={message.from_user.id}'>{message.from_user.first_name}</a>\n"
         f"📞 Номер: <code>{phone}</code>\n"
         f"📦 Товары:\n— {items}"
     )
     bot.send_message(ADMIN_ID, admin_text, parse_mode='HTML')
 
-    # Очищаем корзину и благодарим клиента
+    # 2. Очищаем корзину и благодарим клиента
     user_carts[user_id] = []
-    bot.send_message(message.chat.id, "✅ Заявка отправлена! Мастер скоро вам позвонит.", 
+    bot.send_message(message.chat.id, "✅ Заявка отправлена! Мастер скоро свяжется с вами.", 
                      reply_markup=types.ReplyKeyboardRemove())
 
 # Обработка если нажали "❌ Продолжить без номера"
@@ -147,13 +152,13 @@ def skip_phone(message):
     bot.send_message(message.chat.id, "✅ Заявка отправлена! Мастер напишет вам в Telegram.", 
                      reply_markup=types.ReplyKeyboardRemove())
 
-# Обработка нажатий на кнопки
+# --- 7. Обработка нажатий на кнопки меню ---
 @bot.message_handler(content_types=['text'])
 def get_text_messages(message):
 # Список кнопок, которые НЕ надо пересылать админу
-    menu_buttons = ["🎈 Посмотреть каталог", "💰 Прайс-лист", "📞 Связаться с мастером", "📸 Наши соц сети", "🛒 Корзина", "❌ Пропустить"]
+    menu_buttons = ["🎈 Каталог", "💰 Прайс-лист", "📞 Связаться с мастером", "📸 Наши соц сети", "🛒 Корзина", "❌ Пропустить"]
 
-    if message.text == "🎈 Посмотреть каталог":
+    if message.text == "🎈 Каталог":
         markup = types.InlineKeyboardMarkup()
         # Кнопка с "коллбэком" (внутренняя команда для бота)
         btn_balloons = types.InlineKeyboardButton(text="🎈 Шары", callback_data="balloons")
@@ -171,17 +176,15 @@ def get_text_messages(message):
         
         # Добавляем кнопки (row - значит каждая в новой строке, или просто .add)
         #markup.add(btn_vk)
-        
-        # bot.send_message(message.chat.id, "Выберите категорию декора:", reply_markup=markup)
         return  # ВАЖНО: останавливаем функцию, чтобы не сработала пересылка!
 
-    elif message.text == "💰 Прайс-лист":
+    if message.text == "💰 Прайс-лист":
         bot.send_message(message.chat.id, "Минимальный заказ от 2000р. \nГелиевые шары от 150р/шт.")
         return # Останавливаем
-    elif message.text == "📞 Связаться с мастером":
+    if message.text == "📞 Связаться с мастером":
         bot.send_message(message.chat.id, "Напишите нам в Telegram: @username")
         return # Останавливаем
-
+    # Кнопки пока нет, оставила на будущее. Например для отзывов использовать
     if message.text == "❌ Пропустить":
         bot.send_message(message.chat.id, "Хорошо! Если возникнут вопросы, просто напишите их сюда в чат.", reply_markup=types.ReplyKeyboardRemove())
 
@@ -199,7 +202,7 @@ def get_text_messages(message):
             bot.send_message(message.chat.id, f"<b>Ваши товары:</b>\n\n— {cart_items}", 
                              parse_mode='HTML', reply_markup=markup)
 
-        # --- 2. Теперь логика пересылки (если это не кнопка) ---
+# --- 8. ЛОГИКА ПЕРЕСЫЛКИ СООБЩЕНИЙ ОТ/К МАСТЕРА (если это не кнопка). ---
     
     # Если пишет АДМИН в ответ на пересланное сообщение
     if message.chat.id == ADMIN_ID and message.reply_to_message:
@@ -216,15 +219,15 @@ def get_text_messages(message):
         bot.reply_to(message, "Ваше сообщение отправлено! Скоро вам ответят. 😊")
         bot.forward_message(ADMIN_ID, message.chat.id, message.message_id)
         
-        # --- 2. Основной обработчик кнопок ---
+# --- 9. Основной обработчик кнопок ---
         # Обработка нажатий на инлайн-кнопки (callback)
 @bot.callback_query_handler(func=lambda call: True)
 def callback_worker(call):
     print(f"--- Нажата кнопка: {call.data} ---")
-
     item = None
-    # --- УРОВЕНЬ 1: ШАРЫ ИЛИ ИГРУШКИ ---
-    if call.data == "balloons":
+
+# --- УРОВЕНЬ 1: КАТАЛОГ -> ШАРЫ ИЛИ ИГРУШКИ ---
+    if call.data == "balloons": #Шары
         markup = types.InlineKeyboardMarkup()
         btn1 = types.InlineKeyboardButton(text="💐 Букеты", callback_data="sub_bouquets")
         btn2 = types.InlineKeyboardButton(text="📸 Фотозоны", callback_data="sub_zones")
@@ -236,7 +239,7 @@ def callback_worker(call):
                              text="Раздел 🎈 Шары. Выберите категорию:", reply_markup=markup)
         return
 
-    elif call.data == "big_toys":
+    elif call.data == "big_toys": # Ростовые Игрушки
         markup = types.InlineKeyboardMarkup()
         btn1 = types.InlineKeyboardButton(text="🧸 Мишки", callback_data="bears_teddy")
         btn2 = types.InlineKeyboardButton(text="🚀 АэроИгрушки", callback_data="sub_aero")
@@ -248,8 +251,8 @@ def callback_worker(call):
                              text="Раздел 🧸 Игрушки. Выберите категорию:", reply_markup=markup)
         return
 
-    # --- УРОВЕНЬ 2: КОНКРЕТНЫЕ ТОВАРЫ (Пример для Букетов) ---
-    # --- ЛОГИКА ДЛЯ БУКЕТОВ ---
+# --- УРОВЕНЬ 2: КОНКРЕТНЫЕ ТОВАРЫ (Пример для Букетов) ---
+# --- ЛОГИКА ДЛЯ БУКЕТОВ ---
     elif call.data == "sub_bouquets":
         markup = types.InlineKeyboardMarkup()
         btn_back = types.InlineKeyboardButton(text="⬅️ Назад к шарам", callback_data="balloons")
@@ -261,7 +264,7 @@ def callback_worker(call):
                              parse_mode='HTML', reply_markup=markup)
                              # --- ЛОГИКА ДЛЯ ФОТОЗОН ---
     
-    # --- ЛОГИКА ДЛЯ ФОТОЗОН ---
+# --- ЛОГИКА ДЛЯ ФОТОЗОН ---
     if call.data == "sub_zones":
         # Карточка №1 для Фотозон
         markup = types.InlineKeyboardMarkup()
@@ -303,14 +306,14 @@ def callback_worker(call):
                                     parse_mode='HTML')
         bot.edit_message_media(media, call.message.chat.id, call.message.message_id, reply_markup=markup)
 
-    # --- ЛОГИКА ДЛЯ МИШЕК ---
+# --- ЛОГИКА ДЛЯ МИШЕК ---
     # Карточка №1 для Мишек
     elif call.data == "bears_teddy":
         item = get_item_by_id("bears_teddy")
 
         print(f"Результат поиска item: {item}") # Посмотрим, что вернулось сюда
 
-# ПРОВЕРКА: если item равен None (ничего не нашли)
+        # ПРОВЕРКА: если item равен None (ничего не нашли)
         if item is None:
             print("⚠ Бот остановился: item пустой")
             bot.answer_callback_query(call.id, "❌ Ошибка: ID 'bears_teddy' не найден в таблице! Пожалуйста, напишите мастеру 'Привет!' в этом чате или в Telegram @smiylia_studio", show_alert=True)
@@ -356,9 +359,10 @@ def callback_worker(call):
            # Если всё сломалось, пробуем просто отправить текст, чтобы юзер не висел
             bot.send_message(call.message.chat.id, f"Ошибка загрузки фото, но вот описание:\n\n{caption}", reply_markup=markup)
 
+    # Карточка №2 для Мишек
     elif call.data == "bears_brown_white": 
         item = get_item_by_id("bears_brown_white") 
-        # Карточка №2 для Мишек
+        
         markup = types.InlineKeyboardMarkup()
         btn_prev = types.InlineKeyboardButton(text="⬅️ Предыдущий", callback_data="bears_teddy")
         btn_add = types.InlineKeyboardButton(text="🛒 Добавить в корзину", callback_data="add_bears_brown_white")
@@ -393,7 +397,22 @@ def callback_worker(call):
                 # Кнопки шлем отдельным сообщением под альбом
                 bot.send_message(call.message.chat.id, "Выберите действие:", reply_markup=markup)
 
-        # --- Обработка добавления в корзину ---
+# --- 10. КНОПКА НАЗАД В САМОЕ НАЧАЛО ---
+    elif call.data == "back_to_main":
+        markup = types.InlineKeyboardMarkup()
+        btn_balloons = types.InlineKeyboardButton(text="🎈 Шары", callback_data="balloons")
+        btn_toys = types.InlineKeyboardButton(text="🧸 Ростовые Игрушки", callback_data="big_toys")
+        markup.add(btn_balloons, btn_toys)
+        
+        # Если было фото — удаляем его, чтобы вернуться к чистому тексту
+        if call.message.content_type == 'photo':
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+            bot.send_message(call.message.chat.id, "Что вас интересует?", reply_markup=markup)
+        else:
+            bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, 
+                                 text="Что вас интересует?", reply_markup=markup)
+
+# --- 11. Обработка добавления в корзину ---
     elif "add_" in call.data:
         item_name = call.data.replace("add_", "")
         user_id = call.from_user.id
@@ -405,28 +424,13 @@ def callback_worker(call):
         
         bot.answer_callback_query(call.id, text=f"✅ {item_name} добавлен в корзину!")
 
-    # --- КНОПКА НАЗАД В САМОЕ НАЧАЛО ---
-    elif call.data == "back_to_main":
-        markup = types.InlineKeyboardMarkup()
-        btn_balloons = types.InlineKeyboardButton(text="🎈 Шары", callback_data="balloons")
-        btn_toys = types.InlineKeyboardButton(text="🧸 Игрушки", callback_data="big_toys")
-        markup.add(btn_balloons, btn_toys)
-        
-        # Если было фото — удаляем его, чтобы вернуться к чистому тексту
-        if call.message.content_type == 'photo':
-            bot.delete_message(call.message.chat.id, call.message.message_id)
-            bot.send_message(call.message.chat.id, "Что вас интересует?", reply_markup=markup)
-        else:
-            bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, 
-                                 text="Что вас интересует?", reply_markup=markup)
-
-        # очистка корзины
+    # Очистка корзины
     elif call.data == "clear_cart":
         user_id = call.from_user.id
         user_carts[user_id] = []
         bot.answer_callback_query(call.id, "Корзина очищена 🗑️") 
 
-   # --- ОБРАБОТКА ЗАКАЗОВ (Запрос контакта) ---
+# --- 12. ОБРАБОТКА ЗАКАЗОВ (Запрос контакта) ---
     elif call.data == "checkout":
         # Создаем кнопки для телефона
         markup = types.ReplyKeyboardMarkup(one_time_keyboard=True, resize_keyboard=True)
@@ -435,7 +439,7 @@ def callback_worker(call):
         markup.add(btn_phone, btn_skip)
         
         bot.send_message(call.message.chat.id, 
-                         "Чтобы мастер мог с вами связаться, отправьте номер телефона или нажмите 'Продолжить без номера':", 
+                         "Чтобы мастер мог с вами связаться, отправьте номер телефона или нажмите 'Продолжить без номера'", 
                          reply_markup=markup)
         bot.answer_callback_query(call.id)
         
