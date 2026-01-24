@@ -13,6 +13,10 @@ client = gspread.authorize(creds)
 
 # Открываем таблицу и конкретный лист
 sheet = client.open("Smiylia_bot").worksheet("photo_catalog") 
+# лист юзеров
+users_sheet = client.open("Smiylia_bot").worksheet("users")
+# лист заказов
+orders_sheet = client.open("Smiylia_bot").worksheet("orders")
 
 # ОБЯЗАТЕЛЬНО: Создаем переменную списка кэша ДО того, как она понадобится функциям. Для заиси данных из гугла в телегу, чтобы не тупило.
 data_cache = sheet.get_all_records()
@@ -51,9 +55,45 @@ bot = telebot.TeleBot(config.TOKEN)
 # Присваиваем значение из конфига локальной переменной
 ADMIN_ID = config.ADMIN_ID # Мой ID
 
+# --- 3. регистрация юзера
+from datetime import datetime
+
+def register_user(message):
+    user_id = str(message.from_user.id)
+    # Читаем ID из первой колонки (User ID)
+    # Предполагаем, что users_sheet уже определен в начале файла
+    existing_ids = users_sheet.col_values(1) 
+    
+    if user_id not in existing_ids:
+        # Собираем данные по твоим колонкам: 
+        # User ID, Имя, Username, Телефон, Last Visit, Дата заказа, Дата выезда
+        new_row = [
+            user_id,                                      # User ID
+            message.from_user.first_name,                 # Имя
+            f"@{message.from_user.username}" if message.from_user.username else "нет", 
+            "Не указан",                                  # Телефон (заполним при заказе)
+            datetime.now().strftime("%d.%m.%Y %H:%M"),    # Last Visit
+            "",                                           # Дата заказа
+            ""                                            # Дата выезда
+        ]
+        users_sheet.append_row(new_row)
+        print(f"✅ Новый пользователь записан: {message.from_user.first_name}")
+    else:
+        # Если юзер уже есть, можно просто обновить ему время последнего визита
+        # Находим строку юзера (индекс начинается с 1)
+        row_index = existing_ids.index(user_id) + 1
+        users_sheet.update_cell(row_index, 5, datetime.now().strftime("%d.%m.%Y %H:%M"))
+
+
 # --- 3. Блок объявления начальных кнопок и при использовании /start ---
 @bot.message_handler(commands=['start'])
 def start(message):
+    # Регистрируем пользователя в таблице 
+    try:
+        register_user(message) 
+    except Exception as e:
+        print(f"Ошибка при регистрации юзера: {e}")
+
     # Создаем каркас для кнопок
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     
@@ -447,4 +487,4 @@ def callback_worker(call):
 print("Бот запущен и ждет кнопок!")
 # non_stop=True — бот будет пытаться переподключиться сам, использовать без infinity так -> bot.polling(non_stop=True) .
 # skip_pending=True — бот проигнорирует те сообщения, что ему слали, пока он был «в обмороке» (чтобы он не спамил ответами сразу после включения).
-bot.infinity_polling(timeout=10, long_polling_timeout=5, skip_pending=True)
+bot.infinity_polling(timeout=20, long_polling_timeout=5, skip_pending=True)
