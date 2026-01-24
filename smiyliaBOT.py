@@ -85,7 +85,7 @@ def register_user(message):
         users_sheet.update_cell(row_index, 5, datetime.now().strftime("%d.%m.%Y %H:%M"))
 
 
-# --- 3. Блок объявления начальных кнопок и при использовании /start ---
+# --- 4. ХЕНДЛЕРЫ Блок объявления начальных кнопок и при использовании /start ---
 @bot.message_handler(commands=['start'])
 def start(message):
     # Регистрируем пользователя в таблице 
@@ -112,7 +112,7 @@ def start(message):
                      f"Привет, {message.from_user.first_name}! \nЯ SmileTime - помощник студии аэродизайна. Чем могу помочь? \n\nНавигация в боте: \n* нажмите 4 квадратика справа в строке сообщений 㗊 для выбора товаров и услуг \n* нажмите на 3 полосочки ☰ для помощи \n* или просто напишите сообщение в этот чат и мастер ответит вам =) \n\n Ждём ваших заказов 🤗" , 
                      reply_markup=markup)
 
-# --- 4. Обработчик команды /help ---
+# --- 5. ХЕНДЛЕР Обработчик команды /help ---
 @bot.message_handler(commands=['help'])
 def help_command(message):
     help_text = (
@@ -125,7 +125,7 @@ def help_command(message):
     )
     bot.send_message(message.chat.id, help_text, parse_mode='HTML')
 
-# --- 5. Обработчик команды /refresh только для админа. Обновление данных из таблицы ---
+# --- 6. ХЕНДЛЕР Обработчик команды /refresh только для админа. Обновление данных из таблицы ---
 @bot.message_handler(commands=['refresh'])
 def refresh_data(message):
     # Проверяем, что пишет именно админ
@@ -146,7 +146,115 @@ def refresh_data(message):
     else:
         bot.send_message(message.chat.id, "У вас нет прав для выполнения этой команды.")
 
+# --- 7. ХЕНДЛЕР Обработчик команды /admin_orders только для админа. Поиск заказов по дате.
+@bot.message_handler(commands=['admin_orders'])
+def start_order_search(message):
+    msg = bot.send_message(message.chat.id, "🔍 Введите дату для поиска заказов (например, 25.01.2026):")
+    bot.register_next_step_handler(msg, process_date_search)
+
+def process_date_search(message):
+    search_date = message.text.strip()
+    # Берем данные из листа orders
+    data = orders_sheet.get_all_records()
+    
+    results = []
+    for row in data:
+        # Ищем по колонке "Дата заказа"
+        if str(row.get('Дата заказа')) == search_date:
+            results.append(f"🎈 {row.get('Имя')}: {row.get('Товары')} ({row.get('Время')})")
+
+    if results:
+        report = f"📅 Список заказов на {search_date}:\n\n" + "\n".join(results)
+        bot.send_message(message.chat.id, report)
+    else:
+        bot.send_message(message.chat.id, f"На {search_date} заказов в таблице не найдено.")
+
 # --- 6. Обработчик команды "contact - Оформить заказ". Отправка Админу ---
+# --- ОБРАБОТКА КОНТАКТА И ПЕРЕХОД К ДАТЕ ---
+@bot.message_handler(content_types=['contact'])
+def contact_handler(message):
+    phone = message.contact.phone_number
+    # Сохраняем телефон сразу в таблицу юзеров (по желанию)
+    user_id = str(message.from_user.id)
+    existing_ids = users_sheet.col_values(1)
+    if user_id in existing_ids:
+        row_index = existing_ids.index(user_id) + 1
+        users_sheet.update_cell(row_index, 4, phone) # 4 колонка - Телефон
+    
+    ask_order_date(message)
+
+# Если нажали "Продолжить без номера" (обработай это в текстовом хендлере)
+@bot.message_handler(func=lambda message: message.text == "❌ Продолжить без номера")
+def skip_phone(message):
+    ask_order_date(message)
+
+# --- ЦЕПОЧКА ВОПРОСОВ ---
+
+def ask_order_date(message):
+    msg = bot.send_message(message.chat.id, "📅 Введите дату заказа (в формате ДД.ММ.ГГГГ, например: 25.01.2026):", reply_markup=types.ReplyKeyboardRemove())
+    bot.register_next_step_handler(msg, ask_order_time)
+
+def ask_order_time(message):
+    order_date = message.text.strip()
+    msg = bot.send_message(message.chat.id, "⏰ Введите удобное время (например: 14:00):")
+    bot.register_next_step_handler(msg, ask_order_address, order_date)
+
+def ask_order_address(message, order_date):
+    order_time = message.text.strip()
+    msg = bot.send_message(message.chat.id, "🏠 Введите адрес доставки или напишите 'Самовывоз':")
+    bot.register_next_step_handler(msg, ask_order_info, order_date, order_time)
+
+def ask_order_info(message, order_date, order_time):
+    address = message.text.strip()
+    msg = bot.send_message(message.chat.id, "🎂 Укажите пол и возраст именинника (или пропустите, написав '-'):")
+    bot.register_next_step_handler(msg, finalize_order, order_date, order_time, address)
+
+def finalize_order(message, user_date, user_time, address):
+    extra_info = message.text.strip()
+    user_id = message.from_user.id
+    
+    # Собираем список товаров из корзины в одну строку
+    cart_items = ", ".join(user_carts.get(user_id, ["Пусто"]))
+    
+    # Готовим данные для новой строки в листе orders
+    # Порядок: ID заказа, Дата заказа, Имя, Username, Телефон, Товары, Время, Адрес, Именинник
+    new_order_row = [
+        #str(datetime.now().timestamp()),             # ID заказа (уникальный номер) в Unix Timestamp (количество секунд) формате
+        datetime.now().strftime("%d.%m.%Y %H:%M:%S"), # ID заказа
+        user_date,                                    # Дата заказа (которую ввел юзер)
+        message.from_user.first_name,                 # Имя
+        f"@{message.from_user.username}",             # Username
+        "Спросить в ЛС",                              # Телефон (если не сохраняли ранее)
+        cart_items,                                   # Товары из корзины
+        user_time,                                    # Время
+        address,                                      # Адрес
+        extra_info                                    # Инфо об имениннике
+    ]
+    
+    # ДОБАВЛЯЕМ НОВУЮ СТРОКУ В ТАБЛИЦУ
+    orders_sheet.append_row(new_order_row)
+    
+    # Уведомляем клиента
+    bot.send_message(message.chat.id, "✨ Спасибо! Ваш заказ записан. Мастер скоро свяжется с вами.")
+    
+    # Уведомляем тебя (Мастера)
+    admin_id = config.ADMIN_ID  # СВОЙ ID
+    admin_msg = (f"🔔 НОВЫЙ ЗАКАЗ в таблице!\n"
+                 f"📅 Дата: {user_date}\n"
+                 f"🛍 Товары: {cart_items}\n"
+                 f"📍 Адрес: {address}\n"
+                 f"📜 Инфо: {extra_info}")
+    bot.send_message(admin_id, admin_msg)
+
+    # 2. Шлем "ЗАГЛУШКУ", которую админ сможет "Реплайнуть"
+    # Мы используем forward_message, чтобы админ видел, кому отвечать
+    bot.send_message(ADMIN_ID, "--- Ниже сообщение для ответа клиенту ---")
+    bot.forward_message(ADMIN_ID, message.chat.id, message.message_id)
+
+    # Очищаем корзину после заказа
+    user_carts[user_id] = []
+
+'''
 @bot.message_handler(content_types=['contact'])
 def contact(message):
     user_id = message.from_user.id
@@ -191,6 +299,7 @@ def skip_phone(message):
     user_carts[user_id] = []
     bot.send_message(message.chat.id, "✅ Заявка отправлена! Мастер напишет вам в Telegram.", 
                      reply_markup=types.ReplyKeyboardRemove())
+'''
 
 # --- 7. Обработка нажатий на кнопки меню ---
 @bot.message_handler(content_types=['text'])
@@ -481,10 +590,25 @@ def callback_worker(call):
         bot.send_message(call.message.chat.id, 
                          "Чтобы мастер мог с вами связаться, отправьте номер телефона или нажмите 'Продолжить без номера'", 
                          reply_markup=markup)
+        # Бот запоминает, что следующее сообщение (телефон или кнопка)
+        # нужно отправить в функцию регистрации телефона
+        bot.register_next_step_handler(msg, handle_phone_step) 
         bot.answer_callback_query(call.id)
         
+        # Устанавливаем команды для обычных пользователей
+bot.set_my_commands([
+    types.BotCommand("start", "Запустить бота 🎈"),
+    types.BotCommand("help", "Помощь и контакты 📞")
+], scope=types.BotCommandScopeDefault())
+
+# Устанавливаем спец-команды только для админа (подставь свой ID из конфига)
+bot.set_my_commands([
+    types.BotCommand("start", "Запустить бота 🎈"),
+    types.BotCommand("refresh", "🔄 Обновить товары из таблиц"),
+    types.BotCommand("admin_orders", "📅 Посмотреть заказы по дате")
+], scope=types.BotCommandScopeChat(config.ADMIN_ID))
 
 print("Бот запущен и ждет кнопок!")
 # non_stop=True — бот будет пытаться переподключиться сам, использовать без infinity так -> bot.polling(non_stop=True) .
 # skip_pending=True — бот проигнорирует те сообщения, что ему слали, пока он был «в обмороке» (чтобы он не спамил ответами сразу после включения).
-bot.infinity_polling(timeout=20, long_polling_timeout=5, skip_pending=True)
+bot.infinity_polling(timeout=20, long_polling_timeout=15, skip_pending=True)
