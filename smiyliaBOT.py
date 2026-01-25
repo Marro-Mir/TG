@@ -91,7 +91,7 @@ def register_user(message):
 def start(message):
     # Регистрируем пользователя в таблице 
     try:
-        с
+        register_user(message) 
     except Exception as e:
         print(f"Ошибка при регистрации юзера: {e}")
 
