@@ -5,6 +5,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 user_carts = {} # Здесь будем хранить товары: {user_id: [список товаров]}   # хранение корзины пользователя
+user_phones = {}
 
 # Настройка доступа гугла
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -90,7 +91,7 @@ def register_user(message):
 def start(message):
     # Регистрируем пользователя в таблице 
     try:
-        register_user(message) 
+        с
     except Exception as e:
         print(f"Ошибка при регистрации юзера: {e}")
 
@@ -172,20 +173,55 @@ def process_date_search(message):
 # --- 6. Обработчик команды "contact - Оформить заказ". Отправка Админу ---
 # --- ОБРАБОТКА КОНТАКТА И ПЕРЕХОД К ДАТЕ ---
 @bot.message_handler(content_types=['contact'])
+def global_phone_handler(message):
+    user_id = message.from_user.id
+    
+    # Если юзер нажал на кнопку "Отправить номер"
+    if message.contact:
+        phone = message.contact.phone_number
+        user_phones[user_id] = phone
+        # Вызываем твой старый обработчик, чтобы он записал всё в таблицу Users
+        contact_handler(message) 
+        
+    # Если юзер нажал на кнопку "❌ Продолжить без номера"
+    elif message.text == "❌ Продолжить без номера":
+        skip_phone(message)
+        
+        
+    # Если юзер просто что-то написал текстом (например, сам ввел номер)
+    else:
+        user_phones[user_id] = message.text
+        ask_order_date(message)
+
 def contact_handler(message):
     phone = message.contact.phone_number
     # Сохраняем телефон сразу в таблицу юзеров (по желанию)
     user_id = str(message.from_user.id)
-    existing_ids = users_sheet.col_values(1)
-    if user_id in existing_ids:
-        row_index = existing_ids.index(user_id) + 1
-        users_sheet.update_cell(row_index, 4, phone) # 4 колонка - Телефон
+    phone = message.contact.phone_number
+    #Сохраняем в память для листа Orders ---
+    user_phones[user_id] = phone
+
+    #Сохраняем в таблицу Users
+    try:
+        user_id_str = str(user_id)
+        existing_ids = users_sheet.col_values(1)
+        if user_id_str in existing_ids:
+            row_index = existing_ids.index(user_id_str) + 1
+            users_sheet.update_cell(row_index, 4, phone) # 4 колонка - Телефон
+    except Exception as e:
+        print(f"Ошибка при записи телефона в таблицу: {e}")
     
+    # Переходим к следующему шагу
     ask_order_date(message)
 
-# Если нажали "Продолжить без номера" (обработай это в текстовом хендлере)
+# Если нажали "Продолжить без номера" (обработай это в текстовом хендлере) 
+# это страховка, нужна для ситуации: пользователь нажал «Оформить», увидел кнопки, но отвлекся. Позже он заходит в чат, видит кнопку «❌ Продолжить без номера» в клавиатуре и нажимает её.
 @bot.message_handler(func=lambda message: message.text == "❌ Продолжить без номера")
 def skip_phone(message):
+    user_id = message.from_user.id
+    # Записываем, что номера нет, чтобы в таблицу Orders ушло "Не указан"
+    user_phones[user_id] = "Не указан" 
+    # Переходим к следующему шагу
     ask_order_date(message)
 
 # --- ЦЕПОЧКА ВОПРОСОВ ---
@@ -224,7 +260,7 @@ def finalize_order(message, user_date, user_time, address):
         user_date,                                    # Дата заказа (которую ввел юзер)
         message.from_user.first_name,                 # Имя
         f"@{message.from_user.username}",             # Username
-        "Спросить в ЛС",                              # Телефон (если не сохраняли ранее)
+        user_phones.get(user_id, "Спросить в ЛС"),    # Ищем в памяти, если нет — пишем текст
         cart_items,                                   # Товары из корзины
         user_time,                                    # Время
         address,                                      # Адрес
@@ -563,6 +599,7 @@ def callback_worker(call):
 
 # --- 11. Обработка добавления в корзину ---
     elif "add_" in call.data:
+        user_phones = {} # Здесь будем временно хранить телефоны по user_id
         item_name = call.data.replace("add_", "")
         user_id = call.from_user.id
         
@@ -587,12 +624,12 @@ def callback_worker(call):
         btn_skip = types.KeyboardButton(text="❌ Продолжить без номера")
         markup.add(btn_phone, btn_skip)
         
-        bot.send_message(call.message.chat.id, 
+        msg = bot.send_message(call.message.chat.id, 
                          "Чтобы мастер мог с вами связаться, отправьте номер телефона или нажмите 'Продолжить без номера'", 
                          reply_markup=markup)
         # Бот запоминает, что следующее сообщение (телефон или кнопка)
         # нужно отправить в функцию регистрации телефона
-        bot.register_next_step_handler(msg, handle_phone_step) 
+        bot.register_next_step_handler(msg, global_phone_handler) 
         bot.answer_callback_query(call.id)
         
         # Устанавливаем команды для обычных пользователей
