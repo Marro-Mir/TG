@@ -85,13 +85,63 @@ def register_user(message):
         row_index = existing_ids.index(user_id) + 1
         users_sheet.update_cell(row_index, 5, datetime.now().strftime("%d.%m.%Y %H:%M"))
 
+# --- 4. обработка созданий карточек
+# Вспомогательная функция для подменю (чтобы не дублировать разметку)
+def show_submenu(call, text, buttons):
+    markup = types.InlineKeyboardMarkup()
+    for btn_text, btn_data in buttons:
+        markup.add(types.InlineKeyboardButton(text=btn_text, callback_data=btn_data))
+    markup.add(types.InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_main"))
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup)
+
+def render_product_card(call, item_id, next_cb=None, prev_cb=None, back_cb="back_to_main"):
+    """Универсальная функция для отрисовки любой карточки товара"""
+    item = get_item_by_id(item_id)
+    
+    if not item:
+        bot.answer_callback_query(call.id, "❌ Товар не найден в базе", show_alert=True)
+        return
+
+    # 1. Сборка кнопок
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton(text="🛒 Добавить в корзину", callback_data=f"add_{item_id}"))
+    
+    nav_row = []
+    if prev_cb: nav_row.append(types.InlineKeyboardButton(text="⬅️ Предыдущий", callback_data=prev_cb))
+    if next_cb: nav_row.append(types.InlineKeyboardButton(text="Следующий ➡️", callback_data=next_cb))
+    if nav_row: markup.add(*nav_row)
+    
+    markup.add(types.InlineKeyboardButton(text="⬅️ Назад", callback_data=back_cb))
+
+    caption = f"<b>{item['name']}</b>\n\n{item['desc']}\n\n💰 <b>Цена: {item['price']} ₽</b>"
+
+    # 2. Логика отображения (фото или альбом)
+    try:
+        if len(item['photos']) > 1:
+            # Если альбом — всегда удаляем старое и шлем заново
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+            media_group = [types.InputMediaPhoto(url, caption=caption if i == 0 else '', parse_mode='HTML') for i, url in enumerate(item['photos'])]
+            bot.send_media_group(call.message.chat.id, media_group)
+            bot.send_message(call.message.chat.id, "Выберите действие:", reply_markup=markup)
+        else:
+            # Если одно фото — пытаемся редактировать для плавности
+            photo_url = item['photos'][0] if item['photos'] else "https://via.placeholder.com/500"
+            if call.message.content_type == 'photo':
+                bot.edit_message_media(types.InputMediaPhoto(photo_url, caption=caption, parse_mode='HTML'), 
+                                       call.message.chat.id, call.message.message_id, reply_markup=markup)
+            else:
+                bot.delete_message(call.message.chat.id, call.message.message_id)
+                bot.send_photo(call.message.chat.id, photo_url, caption=caption, parse_mode='HTML', reply_markup=markup)
+    except Exception as e:
+        print(f"Ошибка рендера: {e}")
+        bot.send_message(call.message.chat.id, f"Карточка {item_id} временно недоступна.")
 
 # --- 4. ХЕНДЛЕРЫ Блок объявления начальных кнопок и при использовании /start ---
 @bot.message_handler(commands=['start'])
 def start(message):
     # Регистрируем пользователя в таблице 
     try:
-        register_user(message) 
+        register_user(message)
     except Exception as e:
         print(f"Ошибка при регистрации юзера: {e}")
 
@@ -290,53 +340,6 @@ def finalize_order(message, user_date, user_time, address):
     # Очищаем корзину после заказа
     user_carts[user_id] = []
 
-'''
-@bot.message_handler(content_types=['contact'])
-def contact(message):
-    user_id = message.from_user.id
-    # Проверяем, есть ли что-то в корзине
-    items = "\n— ".join(user_carts.get(user_id, ["Товары не определены"]))
-    phone = message.contact.phone_number
-
-    # 1. Сообщение админу при отправке С НОМЕРОМ
-    admin_text = (
-        f"🔔 <b>НОВЫЙ ЗАКАЗ С НОМЕРОМ!</b>\n\n"
-        f"👤 Клиент: <a href='tg://user?id={message.from_user.id}'>{message.from_user.first_name}</a>\n"
-        f"📞 Номер: <code>{phone}</code>\n"
-        f"📦 Товары:\n— {items}"
-    )
-    bot.send_message(ADMIN_ID, admin_text, parse_mode='HTML')
-
-    # 2. Очищаем корзину и благодарим клиента
-    user_carts[user_id] = []
-    bot.send_message(message.chat.id, "✅ Заявка отправлена! Мастер скоро свяжется с вами.", 
-                     reply_markup=types.ReplyKeyboardRemove())
-
-# Обработка если нажали "❌ Продолжить без номера"
-@bot.message_handler(func=lambda message: message.text == "❌ Продолжить без номера")
-def skip_phone(message):
-    user_id = message.from_user.id
-    items = "\n— ".join(user_carts.get(user_id, ["Товары не определены"]))
-    
-    # 1. Сначала шлем админу ПОЛНУЮ информацию о заказе (красиво)
-    order_info = (
-        f"🔔 <b>ЗАКАЗ БЕЗ НОМЕРА!</b>\n\n"
-        f"👤 Клиент: @{message.from_user.username if message.from_user.username else message.from_user.first_name}\n"
-        f"📦 Товары:\n— {items}"
-    )
-    bot.send_message(ADMIN_ID, order_info, parse_mode='HTML')
-    
-    # 2. Шлем "ЗАГЛУШКУ", которую админ сможет "Реплайнуть"
-    # Мы используем forward_message, чтобы админ видел, кому отвечать
-    bot.send_message(ADMIN_ID, "--- Ниже сообщение для ответа клиенту ---")
-    bot.forward_message(ADMIN_ID, message.chat.id, message.message_id)
-    
-    # 3. Очищаем корзину и отвечаем клиенту
-    user_carts[user_id] = []
-    bot.send_message(message.chat.id, "✅ Заявка отправлена! Мастер напишет вам в Telegram.", 
-                     reply_markup=types.ReplyKeyboardRemove())
-'''
-
 # --- 7. Обработка нажатий на кнопки меню ---
 @bot.message_handler(content_types=['text'])
 def get_text_messages(message):
@@ -403,235 +406,89 @@ def get_text_messages(message):
     elif message.chat.id != ADMIN_ID and message.text not in menu_buttons:
         bot.reply_to(message, "Ваше сообщение отправлено! Скоро вам ответят. 😊")
         bot.forward_message(ADMIN_ID, message.chat.id, message.message_id)
-        
-# --- 9. Основной обработчик кнопок ---
-        # Обработка нажатий на инлайн-кнопки (callback)
+
 @bot.callback_query_handler(func=lambda call: True)
+
 def callback_worker(call):
-    print(f"--- Нажата кнопка: {call.data} ---")
-    item = None
-
-# --- УРОВЕНЬ 1: КАТАЛОГ -> ШАРЫ ИЛИ ИГРУШКИ ---
-    if call.data == "balloons": #Шары
-        markup = types.InlineKeyboardMarkup()
-        btn1 = types.InlineKeyboardButton(text="💐 Букеты", callback_data="sub_bouquets")
-        btn2 = types.InlineKeyboardButton(text="📸 Фотозоны", callback_data="sub_zones")
-        btn_back = types.InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_main")
-        markup.add(btn1, btn2)
-        markup.add(btn_back)
+    print(f"--- Нажата кнопка: {call.data} ---") # Твоя важная отладка
+    
+    # --- УРОВЕНЬ 1: ГЛАВНЫЕ КАТЕГОРИИ ---
+    if call.data == "balloons":
+        show_submenu(call, "Раздел 🎈 Шары. Выберите категорию:", [
+            ("💐 Букеты", "sub_bouquets"), 
+            ("📸 Фотозоны", "sub_zones")
+        ])
         
-        bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, 
-                             text="Раздел 🎈 Шары. Выберите категорию:", reply_markup=markup)
-        return
+    elif call.data == "big_toys":
+        show_submenu(call, "Раздел 🧸 Ростовые Игрушки. Выберите категорию:", [
+            ("🧸 Мишки", "bears_teddy"), 
+            ("🚀 АэроИгрушки", "sub_aero")
+        ])
 
-    elif call.data == "big_toys": # Ростовые Игрушки
-        markup = types.InlineKeyboardMarkup()
-        btn1 = types.InlineKeyboardButton(text="🧸 Мишки", callback_data="bears_teddy")
-        btn2 = types.InlineKeyboardButton(text="🚀 АэроИгрушки", callback_data="sub_aero")
-        btn_back = types.InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_main")
-        markup.add(btn1, btn2)
-        markup.add(btn_back)
-        
-        bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, 
-                             text="Раздел 🧸 Игрушки. Выберите категорию:", reply_markup=markup)
-        return
-
-# --- УРОВЕНЬ 2: КОНКРЕТНЫЕ ТОВАРЫ (Пример для Букетов) ---
-# --- ЛОГИКА ДЛЯ БУКЕТОВ ---
+    # --- УРОВЕНЬ 2: КОНКРЕТНЫЕ ТОВАРЫ И КАРТОЧКИ ---
+    
+    # БУКЕТЫ (Оставляем твой текстовый вариант, как был)
     elif call.data == "sub_bouquets":
         markup = types.InlineKeyboardMarkup()
-        btn_back = types.InlineKeyboardButton(text="⬅️ Назад к шарам", callback_data="balloons")
-        markup.add(btn_back)
-        
-        # Сюда можно отправить фото или просто текст с ценами
+        markup.add(types.InlineKeyboardButton(text="⬅️ Назад к шарам", callback_data="balloons"))
         bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, 
-                             text="💐 <b>Наши букеты:</b>\n\n— Ромашки (7 шт): 1400₽\n— Ассорти: 2500₽\n\nДля заказа просто напишите нам!", 
+                             text="💐 <b>Наши букеты:</b>\n\n— Ромашки (7 шт): 1400₽\n— Ассорти: 2500₽\n\nДля заказа просто добавьте их в корзину!", 
                              parse_mode='HTML', reply_markup=markup)
-                             # --- ЛОГИКА ДЛЯ ФОТОЗОН ---
-    
-# --- ЛОГИКА ДЛЯ ФОТОЗОН ---
-    if call.data == "sub_zones":
-        # Карточка №1 для Фотозон
-        markup = types.InlineKeyboardMarkup()
-        btn_next = types.InlineKeyboardButton(text="Следующая ➡️", callback_data="zone_2")
-        # Вместо order_bears_teddy пишем add_bears_teddy
-        btn_add = types.InlineKeyboardButton(text="🛒 Добавить в корзину", callback_data="add_zone_1")
-        btn_back = types.InlineKeyboardButton(text="⬅️ В главное меню", callback_data="back_to_main")
-        markup.add(btn_add)
-        markup.add(btn_next)
-        markup.add(btn_back)
 
-        # ПРОВЕРКА ДЛЯ ПЛАВНОСТИ:
-        if call.message.content_type == 'photo':
-            # Если мы УЖЕ смотрим фото (нажали "Назад" со второй фотозоны)
-            media = types.InputMediaPhoto("https://drive.google.com/uc?export=download&id=1ZIIh5y1Vh9Tr-6jLrOAFSI1c5wvazqua", 
-                                        caption="<b>📸 Фотозона 'Silver Star'</b>\n\n💰 <b>Цена: 8 500 ₽</b>", 
-                                        parse_mode='HTML')
-            bot.edit_message_media(media, call.message.chat.id, call.message.message_id, reply_markup=markup)
-        else:
-            # Если мы зашли сюда из ТЕКСТОВОГО меню
-            bot.delete_message(call.message.chat.id, call.message.message_id)
-            bot.send_photo(call.message.chat.id, "https://drive.google.com/uc?export=download&id=1ZIIh5y1Vh9Tr-6jLrOAFSI1c5wvazqua", 
-                           caption="<b>📸 Фотозона 'Silver Star'</b>\n\n💰 <b>Цена: 8 500 ₽</b>", 
-                           parse_mode='HTML', reply_markup=markup)
-
+    # ФОТОЗОНЫ (Используем супер-функцию)
+    elif call.data == "sub_zones":
+        render_product_card(call, "zone_1", next_cb="zone_2", back_cb="balloons")
     elif call.data == "zone_2":
-        # Карточка №2 для Фотозон
-        markup = types.InlineKeyboardMarkup()
-        btn_prev = types.InlineKeyboardButton(text="⬅️ Предыдущая", callback_data="sub_zones")
-        btn_add = types.InlineKeyboardButton(text="🛒 Добавить в корзину", callback_data="add_zone_2")
-        btn_back = types.InlineKeyboardButton(text="⬅️ В главное меню", callback_data="back_to_main")
-        markup.add(btn_add)
-        markup.add(btn_prev)
-        markup.add(btn_back)
+        render_product_card(call, "zone_2", prev_cb="sub_zones", back_cb="balloons")
 
-        # Меняем фото и текст на вторую карточку
-        media = types.InputMediaPhoto("https://drive.google.com/uc?export=download&id=14m2lxriJN1pPqA4xgtlKBp3CVNkOTy8Q", 
-                                    caption="<b>📸 Фотозона 'Organic'</b>\n\nРазмер: 3м ширина\nРазнокалиберная гирлянда.\n\n💰 <b>Цена: 12 000 ₽</b>", 
-                                    parse_mode='HTML')
-        bot.edit_message_media(media, call.message.chat.id, call.message.message_id, reply_markup=markup)
-
-# --- ЛОГИКА ДЛЯ МИШЕК ---
-    # Карточка №1 для Мишек
+    # МИШКИ (Используем супер-функцию)
     elif call.data == "bears_teddy":
-        item = get_item_by_id("bears_teddy")
+        render_product_card(call, "bears_teddy", next_cb="bears_brown_white", back_cb="big_toys")
+    elif call.data == "bears_brown_white":
+        render_product_card(call, "bears_brown_white", prev_cb="bears_teddy", back_cb="big_toys")
 
-        print(f"Результат поиска item: {item}") # Посмотрим, что вернулось сюда
+    # --- СЛУЖЕБНЫЕ КНОПКИ ---
 
-        # ПРОВЕРКА: если item равен None (ничего не нашли)
-        if item is None:
-            print("⚠ Бот остановился: item пустой")
-            bot.answer_callback_query(call.id, "❌ Ошибка: ID 'bears_teddy' не найден в таблице! Пожалуйста, напишите мастеру 'Привет!' в этом чате или в Telegram @smiylia_studio", show_alert=True)
-            return  # Останавливаем функцию здесь, чтобы не было ошибок дальше
+    # ДОБАВЛЕНИЕ В КОРЗИНУ
+    elif "add_" in call.data:
+        item_id = call.data.replace("add_", "")
+        user_id = call.from_user.id
+        if user_id not in user_carts:
+            user_carts[user_id] = []
+        user_carts[user_id].append(item_id)
+        bot.answer_callback_query(call.id, text=f"✅ Добавлено в корзину!")
 
-        if item:
-            # Кнопки для карточки №1 для Мишек
-            markup = types.InlineKeyboardMarkup()
-            btn_next = types.InlineKeyboardButton(text="Следующий ➡️", callback_data="bears_brown_white")
-            btn_add = types.InlineKeyboardButton(text="🛒 Добавить в корзину", callback_data="add_bears_teddy")
-            btn_back = types.InlineKeyboardButton(text="⬅️ В главное меню", callback_data="back_to_main")
-            markup.add(btn_add)
-            markup.add(btn_next)
-            markup.add(btn_back)
-
-            caption = f"<b>{item['name']}</b>\n\n{item['desc']}\n\n💰 <b>Цена: от {item['price']} ₽</b>"
-
-         # ПРОВЕРКА ДЛЯ ПЛАВНОСТИ:
-        try:
-            if len(item['photos']) == 1:
-                print("🚀 Режим: Одно фото")
-                # Пытаемся заменить старое сообщение на фото
-                if call.message.content_type == 'photo':
-                    media = types.InputMediaPhoto(item['photos'][0], caption=caption, parse_mode='HTML')
-                    bot.edit_message_media(media, call.message.chat.id, call.message.message_id, reply_markup=markup)
-                else:
-                     # Если старое было текстом - удаляем и шлем новое
-                    bot.delete_message(call.message.chat.id, call.message.message_id)
-                    bot.send_photo(call.message.chat.id, item['photos'][0], caption=caption, parse_mode='HTML', reply_markup=markup)
-        
-            elif len(item['photos']) > 1:
-                print("🚀 Режим: Альбом")
-                bot.delete_message(call.message.chat.id, call.message.message_id)
-                media_group = []
-                for i, url in enumerate(item['photos']):
-                    media_group.append(types.InputMediaPhoto(url, caption=caption if i == 0 else '', parse_mode='HTML'))
-            
-                bot.send_media_group(call.message.chat.id, media_group)
-                bot.send_message(call.message.chat.id, "Выберите действие:", reply_markup=markup)
-
-        except Exception as e:
-            print(f"❌ Ошибка при отправке: {e}")
-           # Если всё сломалось, пробуем просто отправить текст, чтобы юзер не висел
-            bot.send_message(call.message.chat.id, f"Ошибка загрузки фото, но вот описание:\n\n{caption}", reply_markup=markup)
-
-    # Карточка №2 для Мишек
-    elif call.data == "bears_brown_white": 
-        item = get_item_by_id("bears_brown_white") 
-        
-        markup = types.InlineKeyboardMarkup()
-        btn_prev = types.InlineKeyboardButton(text="⬅️ Предыдущий", callback_data="bears_teddy")
-        btn_add = types.InlineKeyboardButton(text="🛒 Добавить в корзину", callback_data="add_bears_brown_white")
-        btn_back = types.InlineKeyboardButton(text="⬅️ В главное меню", callback_data="back_to_main")
-        markup.add(btn_add)
-        markup.add(btn_prev)
-        markup.add(btn_back)
-
-        caption = f"<b>{item['name']}</b>\n\n{item['desc']}\n\n💰 <b>Цена: от {item['price']} ₽</b>"
-
-         # ПРОВЕРКА ДЛЯ ПЛАВНОСТИ:
-        if call.message.content_type == 'photo':
-            # ПРОВЕРКА: Одно фото или несколько?
-            if len(item['photos']) == 1:
-                # --- РЕЖИМ ОДНОГО ФОТО (Плавный) ---
-                if call.message.content_type == 'photo':
-                    media = types.InputMediaPhoto(item['photos'][0], caption=caption, parse_mode='HTML')
-                    bot.edit_message_media(media, call.message.chat.id, call.message.message_id, reply_markup=markup)
-                else:
-                    bot.delete_message(call.message.chat.id, call.message.message_id)
-                    bot.send_photo(call.message.chat.id, item['photos'][0], caption=caption, parse_mode='HTML', reply_markup=markup)
-            
-            else:
-                # --- РЕЖИМ АЛЬБОМА ---
-                bot.delete_message(call.message.chat.id, call.message.message_id)
-                
-                media_group = []
-                for i, url in enumerate(item['photos']):
-                    media_group.append(types.InputMediaPhoto(url, caption=caption if i == 0 else '', parse_mode='HTML'))
-                
-                bot.send_media_group(call.message.chat.id, media_group)
-                # Кнопки шлем отдельным сообщением под альбом
-                bot.send_message(call.message.chat.id, "Выберите действие:", reply_markup=markup)
-
-# --- 10. КНОПКА НАЗАД В САМОЕ НАЧАЛО ---
+    # НАЗАД В ГЛАВНОЕ МЕНЮ
+    # ВЕРНУТЬСЯ В НАЧАЛО
     elif call.data == "back_to_main":
+        # Создаем те же кнопки, что были при команде /start
         markup = types.InlineKeyboardMarkup()
         btn_balloons = types.InlineKeyboardButton(text="🎈 Шары", callback_data="balloons")
         btn_toys = types.InlineKeyboardButton(text="🧸 Ростовые Игрушки", callback_data="big_toys")
         markup.add(btn_balloons, btn_toys)
-        
-        # Если было фото — удаляем его, чтобы вернуться к чистому тексту
+
         if call.message.content_type == 'photo':
+            # Если мы были в карточке с фото — удаляем её и шлем новое меню текстом
             bot.delete_message(call.message.chat.id, call.message.message_id)
             bot.send_message(call.message.chat.id, "Что вас интересует?", reply_markup=markup)
         else:
-            bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, 
-                                 text="Что вас интересует?", reply_markup=markup)
+            # Если мы были в текстовом подменю — просто редактируем текст
+            bot.edit_message_text(chat_id=call.message.chat.id, 
+                                 message_id=call.message.message_id, 
+                                 text="Что вас интересует?", 
+                                 reply_markup=markup)
 
-# --- 11. Обработка добавления в корзину ---
-    elif "add_" in call.data:
-        user_phones = {} # Здесь будем временно хранить телефоны по user_id
-        item_name = call.data.replace("add_", "")
-        user_id = call.from_user.id
-        
-        if user_id not in user_carts:
-            user_carts[user_id] = []
-        
-        user_carts[user_id].append(item_name)
-        
-        bot.answer_callback_query(call.id, text=f"✅ {item_name} добавлен в корзину!")
-
-    # Очистка корзины
-    elif call.data == "clear_cart":
-        user_id = call.from_user.id
-        user_carts[user_id] = []
-        bot.answer_callback_query(call.id, "Корзина очищена 🗑️") 
-
-# --- 12. ОБРАБОТКА ЗАКАЗОВ (Запрос контакта) ---
+    # ОФОРМЛЕНИЕ ЗАКАЗА
     elif call.data == "checkout":
-        # Создаем кнопки для телефона
         markup = types.ReplyKeyboardMarkup(one_time_keyboard=True, resize_keyboard=True)
-        btn_phone = types.KeyboardButton(text="📱 Отправить номер", request_contact=True)
-        btn_skip = types.KeyboardButton(text="❌ Продолжить без номера")
-        markup.add(btn_phone, btn_skip)
-        
-        msg = bot.send_message(call.message.chat.id, 
-                         "Чтобы мастер мог с вами связаться, отправьте номер телефона или нажмите 'Продолжить без номера'", 
-                         reply_markup=markup)
-        # Бот запоминает, что следующее сообщение (телефон или кнопка)
-        # нужно отправить в функцию регистрации телефона
-        bot.register_next_step_handler(msg, global_phone_handler) 
+        markup.add(types.KeyboardButton(text="📱 Отправить номер", request_contact=True),
+                   types.KeyboardButton(text="❌ Продолжить без номера"))
+        msg = bot.send_message(call.message.chat.id, "Оставьте номер для связи:", reply_markup=markup)
+        bot.register_next_step_handler(msg, global_phone_handler)
         bot.answer_callback_query(call.id)
-        
+
+
+
         # Устанавливаем команды для обычных пользователей
 bot.set_my_commands([
     types.BotCommand("start", "Запустить бота 🎈"),
