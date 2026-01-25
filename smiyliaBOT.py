@@ -458,6 +458,12 @@ def callback_worker(call):
         user_carts[user_id].append(item_id)
         bot.answer_callback_query(call.id, text=f"✅ Добавлено в корзину!")
 
+        # Очистка корзины
+    elif call.data == "clear_cart":
+        user_id = call.from_user.id
+        user_carts[user_id] = []
+        bot.answer_callback_query(call.id, "Корзина очищена 🗑️") 
+
     # НАЗАД В ГЛАВНОЕ МЕНЮ
     # ВЕРНУТЬСЯ В НАЧАЛО
     elif call.data == "back_to_main":
